@@ -1,0 +1,47 @@
+map map_matches {
+    let last_timestamp = meta("last_timestamp").number()
+    let last_count = meta("last_count").number()
+
+    let current_timestamp = this.Matches.0.startTime.format_timestamp_unix().apply("trunc_to_minute")
+    let current_count = this.Matches.filter(m -> m.startTime.format_timestamp_unix().apply("trunc_to_minute") == $last_timestamp).length()
+
+    root = match {
+        ($current_timestamp > $last_timestamp) || ($current_count > $last_count) => this.Matches.filter(m -> m.startTime.format_timestamp_unix().apply("trunc_to_minute") >= $last_timestamp).map_each(m -> m.apply("map_match")),
+        _ => this.Matches.filter(m -> m.startTime.format_timestamp_unix().apply("trunc_to_minute") > $last_timestamp).map_each(m -> m.apply("map_match"))
+    }
+}
+
+map map_match {
+    root.MatchId = this.MatchId
+    root.CrystalLeagueLevel = this.crystalLeagueLevel
+    root.Winner = this.winner
+    
+    root.Team1.Players = this.team1Results.values().map_each(p -> p.apply("map_player"))
+    root.Team1.Tickets = this.team1Tickets
+    # root.Team1.Timeline = this.team1Timeline.map_each(p -> p.apply("map_timeline"))
+    
+    root.Team2.Players = this.team2Results.values().map_each(p -> p.apply("map_player"))
+    root.Team2.Tickets = this.team2Tickets
+    # root.Team2.Timeline = this.team2Timeline.map_each(p -> p.apply("map_timeline"))
+    
+    let matchTime = this.startTime.format_timestamp_unix()
+    root.MatchTime = $matchTime.format_timestamp(format: "2006-01-02 15:04", tz: "UTC")
+}
+
+map map_player {
+    root.Name = this.Name
+    root.Kills = this.Kills
+    root.Deaths = this.Deaths
+    root.Healing = (this.Healing | 0.0).floor()
+    root.Fame = this.Fame
+}
+
+map map_timeline {
+    root.EventType = this.EventType
+    root.TimeStamp = this.TimeStamp
+    root.Tickets = this.Tickets
+}
+
+map trunc_to_minute {
+    root = this.format_timestamp("2006-01-02 15:04").parse_timestamp("2006-01-02 15:04").format_timestamp_unix()
+}

@@ -1,0 +1,1 @@
+/benthos -c ./src/config.yaml

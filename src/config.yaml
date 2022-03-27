@@ -1,0 +1,139 @@
+input:
+  label: "cron"
+  generate:
+    mapping: root = {}
+    interval: "0 0,30 * * * *"
+
+pipeline:
+  processors:
+    - label: "log_start_message"
+      log:
+        level: INFO
+        message: "Processing message..."
+
+    - label: get_cache_timestamp
+      branch:
+        processors:
+          - cache:
+              resource: crystal_listener_cache
+              operator: get
+              key: "cl_last_timestamp"
+        result_map: |
+          meta last_timestamp = content().number()
+
+    - catch:
+        - bloblang: |
+            meta last_timestamp = 0
+
+    - label: get_cache_count
+      branch:
+        processors:
+          - cache:
+              resource: crystal_listener_cache
+              operator: get
+              key: "cl_last_count"
+        result_map: |
+          meta last_count = content().number()
+
+    - catch:
+        - bloblang: |
+            meta last_count = 0
+
+    - bloblang: |
+        meta offset = 0
+
+    - label: call_ao_api
+      while:
+        at_least_once: true
+        check: meta("current_timestamp") != null && ( meta("last_timestamp").number() < meta("current_timestamp").number() )
+        max_loops: 10
+        processors:
+          - branch:
+              processors:
+                - http:
+                    url: >-
+                      https://gameinfo.albiononline.com/api/gameinfo/matches/crystalleague?category=crystal_league&limit=50&offset=${! meta("offset") }
+                    verb: GET
+                    rate_limit: crystal_searches
+                    timeout: 10s
+                    parallel: false
+                    headers:
+                      Content-Type: application/json
+
+                - bloblang: root = if errored() { deleted() }
+
+              result_map: |
+                meta offset = meta("offset").number() + 50
+                meta current_timestamp = this.49.startTime.format_timestamp_unix()
+                root.results = (root.results | []).append(this)
+
+    - label: "flatten_results"
+      bloblang: root.Matches = this.results.flatten()
+
+    - label: "process_matches"
+      bloblang: |
+
+        import "./src/mappers/match_mapper.blobl"
+
+        root.Matches = this.apply("map_matches")
+
+        let new_timestamp = root.Matches.0.MatchTime.parse_timestamp("2006-01-02 15:04").format_timestamp_unix() | meta("last_timestamp").number()
+        let new_count = this.Matches.
+          filter(m -> m.startTime.format_timestamp_unix() >= $new_timestamp).
+          length()
+
+        meta new_timestamp = $new_timestamp
+        meta new_count = if $new_count > 0 {
+          $new_count
+        } else {
+          meta("last_count")
+        }
+        meta processed = root.Matches.length()
+
+    - label: store_cache_timestamp
+      cache:
+        resource: crystal_listener_cache
+        operator: set
+        key: "cl_last_timestamp"
+        value: '${! meta("new_timestamp") }'
+
+    - label: store_cache_count
+      cache:
+        resource: crystal_listener_cache
+        operator: set
+        key: "cl_last_count"
+        value: '${! meta("new_count") }'
+
+    - label: "log_proccessed_count"
+      log:
+        level: INFO
+        message: 'records_processed: ${! meta("processed") } - new_timestamp: ${! meta("new_timestamp") }'
+
+    - label: sort
+      bloblang: root = this.Matches.sort_by(ele -> ele.MatchTime)
+
+    - label: unarchive
+      unarchive:
+        format: json_array
+
+    - label: delete_errors
+      bloblang: root = if errored() { deleted() }
+
+output:
+  # stdout: {}
+  kafka:
+    addresses:
+      - broker:29092
+    topic: ao_crystals
+    key: ${! json("MatchId") }
+
+cache_resources:
+  - label: crystal_listener_cache
+    redis:
+      url: redis://ao_cache:6379
+
+rate_limit_resources:
+  - label: crystal_searches
+    local:
+      count: 20
+      interval: 30m
